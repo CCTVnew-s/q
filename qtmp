@@ -1,0 +1,77 @@
+
+
+
+// SPLIT PEACH FUNCTION,      split the huge table by features, apply function separately and parallelly ; using space change for speed
+
+.util.peachapply2table:{[t1;t2;peachcol;f; applysto]
+                                             partt1: ?[t1;();peachcol!peachcol;`stind`endind!((min;`i);(max;`i))];
+                                             partt2: ?[t2;();peachcol!peachcol;`stind`endind!((min;`i);(max;`i))];
+                                             applyf:{[t1;t2;partt1;partt2;f;applyon]
+                                                  0N! raze "apply on " , {x," "} each string value applyon;
+                                                  f[ ?[t1; enlist (within;`i;value partt1[applyon]) ; 0b;()];   ?[t2; enlist (within;`i;value partt2[applyon]) ; 0b;()]  ]};
+                                            errthrowapplyf:{[t1;t2;partt1;partt2;f;applyon;applyf]
+                                                        show raze "apply on " , {x," "} each string value applyon;
+                                                    @[applyf[t1;t2;partt1;partt2;f;]; applyon; {[applyon;err] '`$ raze "Error when apply on ", ({x," "} each string value applyon), ":", err  }[applyon;]]};                                   
+                                           rtn: (),/ errthrowapplyf[t1;t2;partt1;partt2;f;;applyf]     peach peachcol!/:applysto; 
+                                    :rtn};
+
+// Event Time Axis  functions, play with the aggregate time windows,   time - "u"$3 doesn't always satisfy the requirements
+// Commonly used time functions    
+//   *    ActualTime  :                     (t1`time) +/: "v"$(-3,0)
+//   *    TradingContinousTime  :           13:00:00 -  00:01:00  ==  11:29:00
+//   *    Discretized by Publising :        13:00:00  - 4 public Cycle  =  11:29: 48 (or around depends on when Tick is published)
+//   *    Customized Time :  varied windows, cross days, this can be complicated
+
+
+.util.timewin.simpleoffset:{[t;offsetL;offsetR] t +/:  (offsetL ;offsetR)};
+
+// using mapping in then mapping back method , below example, how you treat 11:30, 09:25 , 13:00 etc)
+.util.timewin.maptototaltradingtime:{  ?[x <09:30:00; 0; ?[x <= 11:30:00; x - 09:29:57.000;  (11:30:00.000 - 09:29:57 )  + x - 13:00:00]]};
+.util.timewin.mapfromtotaltradingtime:{  ?[x <00:00:03.000; 09:25:00.000 ; ?[x <=  11:30:00.000 - 09:29:57.000 ; 09:29:57.00 + x ;  13:00:00  +  x -  11:30:00.000 - 09:29:57.000]]};
+
+.util.timewin.CToffset:{[t;offsetL;offsetR]  .util.timewin.mapfromtotaltradingtime each ( .util.timewin.maptototaltradingtime[t]) +/: (offsetL;offsetR)};
+
+// map to publish time axis
+// split can be (sym;date) every single symbol, date, the quote tick are indexed; or split be symbol, tick of all days are indexed sequentially
+// a bit handle of before 09:30:00 and 
+
+.util.timewin.getQuoteEventAxis:{[quote;splitcol] ?[quote;();splitcol!splitcol;`time`index!(({(last x where x < 09:30:00.000),x where x >= 09:30:00.000 };`time);({til (count x) + 1 - (sum x < 09:30:00.000)};`time))]};
+
+.util.timewin.evenindexOffset:{[eventaxis;split;t;offsetL;offsetR] idtbl: flip eventaxis[split]; M: max idtbl`index; m:min idtbl`index;
+                                  offsetindex:{[index;offset;m;M]  max(min(index + offset;M);m)};
+                               @[((update lid: offsetindex[index;offsetL;m;M], rid: offsetindex[index;offsetR;m;M] from 
+                                  aj[`time; ([] time:t);idtbl]) lj (`lid xkey `ltime`lid xcol idtbl)) lj
+                                 (`rid xkey `rtime`rid xcol idtbl);`ltime`rtime]};
+
+
+// Testing data backbone
+getEventAxisClient:{[st;et;c;bookdata;dailydata;cdatafilter]
+            ajbook:{[x;book;cdatafilter] aj[`time;
+                              ?[x; cdatafilter;0b;()] ;
+                             ?[book;();0b;`time`ask1`asize1`bid1`bsize1`booktime!`time`ask1`asize1`bid1`bsize1`time]]};
+            corder: `sym`date`time xasc update account:.data.crmremap account from .dataapi.getOrder[st + 1 + til 1 + et - st; c ;`;`New];
+            :  .util.peachapply2table[corder;bookdata;`sym`date;ajbook[;;cdatafilter] ;exec distinct  flip (sym;date) from corder] lj `date`sym xkey ?[dailydata;();0b;`date`sym`open`high`low`close!`date`sym`open`high`low`close]}; 
+            
+
+getEventAxisBook:{[bookdata;orderdata;dailydata;floors]
+                   tgtc: exec distinct account from orderdata;
+                   floorcols: `$ raze ("ask";"asize";"bid";"bsize"),/:\: string 1 + til floors;
+                   extractdata:{[book;cdata;floorcols;tgtc] 
+                                 cdatabooktime: aj0[`time;cdata;([]time: book`time; booktime:book`time)];
+                                 matcheachclient:  {[cdatabooktime;ac] `time xkey ?[cdatabooktime;enlist (=;`account;enlist ac);0b; (`time;`$(string ac),"px";`$(string ac),"qty")!(`time;`price;({?[y=`Buy;x;neg x]};`quantity;`side)) ] };
+                                 ?[book;();0b; (`sym`date`time,floorcols)!`sym`date`time,floorcols]   lj/ matcheachclient[cdatabooktime;] each tgtc};
+                  .util.peachapply2table[bookdata;orderdata;`sym`date;extractdata[;;floorcols;tgtc] ;exec distinct  flip (sym;date) from bookdata] lj `date`sym xkey ?[dailydata;();0b;`date`sym`open`high`low`close!`date`sym`open`high`low`close]};
+
+
+// TEST1 join on trade check (NoB - NoS)%(NoB + NoS)  
+sig1: {[t1;t2;win]  wj1[.util.timewin.CToffset[;neg win*1000; -500] t1`time; `time;([]time:t1`time) ; (t2;({[x;y;z](x1 - y1)%(x1:count distinct x)+(y1:count distinct y) + 0.0001};`BuyOrderID;`SaleOrderID;`$"sig1_",string win))]};
+sig1s: {[t1;t2;wins] t1 lj `time xkey  {x lj `time xkey y} over sig1[t1;t2;] each wins};
+
+sig1b: {[t1;t2;win]  wj1[.util.timewin.CToffset[;neg win*1000; -500] t1`time; `time;([]time:t1`time) ; (t2;({[x;z](x1 - y1)%(x1:sum x)+(y1:(count x)-sum x ) + 0.0001};`Side;`$"sig1b_",string win))]};
+sig1bs: {[t1;t2;wins] t1 lj `time xkey  {x lj `time xkey y} over sig1b[t1;t2;] each wins};
+
+sig1c: {[t1;t2;win]  wj1[.util.timewin.CToffset[;neg win*1000; -500] t1`time; `time;([]time:t1`time) ; (t2;({[x;y;z](x1 - y1)%(x1:sum y where x)+(y1:sum y where not x) + 0.0001};`Side;`Volume;`$"sig1c_",string win))]};
+sig1cs: {[t1;t2;wins] t1 lj `time xkey  {x lj `time xkey y} over sig1c[t1;t2;] each wins};
+
+
+
